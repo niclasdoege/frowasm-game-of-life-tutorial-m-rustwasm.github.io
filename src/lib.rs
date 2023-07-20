@@ -1,9 +1,23 @@
 mod utils;
 
+//use std::os::fd::AsRawFd;
+
+use js_sys::Math::log;
 use wasm_bindgen::prelude::*;
 
-use std::fmt;
+extern crate js_sys;
 
+extern crate web_sys;
+
+extern crate fixedbitset;
+use fixedbitset::FixedBitSet;
+
+// A macro to provide `println!(..)`-style syntax for `console.log` logging.
+macro_rules! log {
+    ( $( $t:tt )* ) => {
+        web_sys::console::log_1(&format!( $( $t )* ).into());
+    }
+}
 
 #[wasm_bindgen]
 #[repr(u8)]
@@ -17,50 +31,99 @@ pub enum Cell {
 pub struct Universe {
     width: u32,
     height: u32,
-    cells: Vec<Cell>,
+    cells: FixedBitSet,
+    //cells: Vec<Cell>,
 }
 
-impl fmt::Display for Universe {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for line in self.cells.as_slice().chunks(self.width as usize) {
-            for &cell in line {
-                let symbol = if cell == Cell::Dead { '◻' } else { '◼' };
-                write!(f, "{}", symbol)?;
-            }
-            write!(f, "\n")?;
-        }
-
-        Ok(())
-    }
-}
 
 /// Public methods, exported to JavaScript.
 #[wasm_bindgen]
 impl Universe {
 
+    pub fn toggle_cell(&mut self, row: u32, column: u32) {
+        let idx = self.get_index(row, column);
+        self.cells.toggle(idx);
+    }
+
+    pub fn insert_glider(&mut self, row: u32, column: u32) {
+        self.cells.toggle(self.get_index(row, column));
+        self.cells.toggle(self.get_index(row, column+1));
+        self.cells.toggle(self.get_index(row, column+2));
+        self.cells.toggle(self.get_index(row-1, column+2));
+        self.cells.toggle(self.get_index(row-2, column+1));
+    }
+
+    pub fn insert_pulsar(&mut self, row: u32, column: u32) {
+        let pulsar05712  = [false,false,true,true,true,false,false,false,true,true,true,false,false];
+        let pulsar1116   = [false,false,false,false,false,false,false,false,false,false,false,false,false];
+        let pulsar2348910= [true,false,false,false,false,true,false,true,false,false,false,false,true];
+        for horizontal in 0..13{     
+            match horizontal{
+                0|5|7|12=>    {for (i,x) in pulsar05712.iter().enumerate(){self.cells.set(self.get_index(row+horizontal, column+i as u32),x.to_owned() );}}
+                1|11|6=>      {for (i,x) in pulsar1116.iter().enumerate(){self.cells.set(self.get_index(row+horizontal, column+i as u32),x.to_owned());}}
+                2|3|4|8|9|10=>{for (i,x) in pulsar2348910.iter().enumerate(){self.cells.set(self.get_index(row+horizontal, column+i as u32),x.to_owned());}}
+                _ =>{}
+            }
+            
+        }
+    }
+
+    pub fn set_width(&mut self, width: u32){
+        self.width=width;
+        self.cells = FixedBitSet::with_capacity((width  * self.height) as usize);
+        //self.cells = (0..width * self.height).map(|_| 0).collect();
+        println!("{:?}",self.cells)
+    }
+
+    pub fn set_height(&mut self, height: u32) {
+        self.height = height;
+        self.cells = FixedBitSet::with_capacity((self.width  * height) as usize);
+        //self.cells = (0..self.width * height).map(|_| 0).collect();
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn clear(&mut self){
+        let size = (self.width * self.height) as usize;
+        for i in 0..size {
+            self.cells.set(i, false);
+        }
+    }
+
+    pub fn reset(&mut self){
+        let size = (self.width * self.height) as usize;
+        for i in 0..size {
+            self.cells.set(i, js_sys::Math::random() < 0.5);
+        }
+    }
+    pub fn cells(&self) -> *const u32 {
+        self.cells.as_slice().as_ptr()
+    }
+
     pub fn new() -> Universe {
+        utils::set_panic_hook();
         let width = 64;
         let height = 64;
 
-        let cells = (0..width * height)
-            .map(|i| {
-                if i % 2 == 0 || i % 7 == 0 {
-                    Cell::Alive
-                } else {
-                    Cell::Dead
-                }
-            })
-            .collect();
+        let size = (width * height) as usize;
+        let mut cells = FixedBitSet::with_capacity(size);
 
+
+        for i in 0..size {
+            cells.set(i, js_sys::Math::random() < 0.5);
+        }
+    
         Universe {
             width,
             height,
             cells,
         }
-    }
-
-    pub fn render(&self) -> String {
-        self.to_string()
     }
 
     pub fn tick(&mut self) {
@@ -72,32 +135,51 @@ impl Universe {
                 let cell = self.cells[idx];
                 let live_neighbors = self.live_neighbor_count(row, col);
 
-                let next_cell = match (cell, live_neighbors) {
-                    // Rule 1: Any live cell with fewer than two live neighbours
-                    // dies, as if caused by underpopulation.
-                    (Cell::Alive, x) if x < 2 => Cell::Dead,
-                    // Rule 2: Any live cell with two or three live neighbours
-                    // lives on to the next generation.
-                    (Cell::Alive, 2) | (Cell::Alive, 3) => Cell::Alive,
-                    // Rule 3: Any live cell with more than three live
-                    // neighbours dies, as if by overpopulation.
-                    (Cell::Alive, x) if x > 3 => Cell::Dead,
-                    // Rule 4: Any dead cell with exactly three live neighbours
-                    // becomes a live cell, as if by reproduction.
-                    (Cell::Dead, 3) => Cell::Alive,
-                    // All other cells remain in the same state.
-                    (otherwise, _) => otherwise,
-                };
+                log!(
+                    "cell[{}, {}] is initially {:?} and has {} live neighbors",
+                    row,
+                    col,
+                    cell,
+                    live_neighbors
+                );
+               
+                next.set(idx, match (cell, live_neighbors) {
+                    (true, x) if x < 2 => false,
+                    (true, 2) | (true, 3) => true,
+                    (true, x) if x > 3 => false,
+                    (false, 3) => true,
+                    (otherwise, _) => otherwise
+                });
 
-                next[idx] = next_cell;
+            }
+        }
+        //let difference = self.cells.difference(&next);
+        let mut differentbits:Vec<(u32, u32)> = vec![];
+        for row in 0..self.height {
+            for col in 0..self.width {
+                let idx = self.get_index(row, col);
+                if self.cells[idx] != next[idx] {
+                    differentbits.push((row,col));
+                    log!(
+                        "cell[{}, {}] is initially {:?} and has {:?} neighbors. it becomes {:?}",
+                        row,
+                        col,
+                        self.cells[idx],
+                        self.live_neighbor_count(row, col),
+                        next[idx]
+                    );
+                }
+                //let difference_at = difference[idx];
             }
         }
 
+        
+            
         self.cells = next;
     }
 
     fn get_index(&self, row: u32, column: u32) -> usize {
-        (row * self.width + column) as usize
+        ((row%self.height) * self.width + (column%self.width)) as usize
     }
 
     fn live_neighbor_count(&self, row: u32, column: u32) -> u8 {
@@ -116,4 +198,22 @@ impl Universe {
         }
         count
     }
+}
+
+//non wasm exposed for testing
+impl Universe {
+    /// Get the dead and alive values of the entire universe.
+    pub fn get_cells(&self) -> &FixedBitSet {
+        &self.cells
+    }
+
+    /// Set cells to be alive in a universe by passing the row and column
+    /// of each cell as an array.
+    pub fn set_cells(&mut self, cells: &[(u32, u32)]) {
+        for (row, col) in cells.iter().cloned() {
+            let idx = self.get_index(row, col);
+            self.cells.insert(idx)
+        }
+    }
+
 }
